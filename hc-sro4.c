@@ -154,8 +154,10 @@ static int do_measurement(struct hc_sro4 *device,
 		 */
 
 	irq = gpiod_to_irq(device->echo_desc);
-	if (irq < 0)
-		return -EIO;
+	if (irq < 0) {
+		ret = -EIO;
+		goto out_mutex;
+	}
 
 	device->echo_received = 0;
 	device->device_triggered = 0;
