@@ -1,9 +1,9 @@
 /* Precise measurements of time delta between sending a trigger signal
- * to the HC-SRO4 distance sensor and receiving the echo signal from
+ * to the HC-SR04 distance sensor and receiving the echo signal from
  * the sensor back. This has to be precise in the usecs range. We
  * use trigger interrupts to measure the signal, so no busy wait :)
  *
- * This supports an (in theory) unlimited number of HC-SRO4 devices.
+ * This supports an (in theory) unlimited number of HC-SR04 devices.
  * To add a device, do a (as root):
  *
  *	# echo 23 24 1000 > /sys/class/distance-sensor/configure
@@ -24,7 +24,7 @@
  *
  * (normally not needed).
  *
- * DO NOT attach your HC-SRO4's echo pin directly to the raspberry, since
+ * DO NOT attach your HC-SR04's echo pin directly to the raspberry, since
  * it runs with 5V while raspberry expects 3V on the GPIO inputs.
  *
  */
@@ -44,7 +44,7 @@
 #include <linux/delay.h>
 #include <linux/sched.h>
 
-struct hc_sro4 {
+struct hc_sr04 {
 	int gpio_trig;
 	int gpio_echo;
 	struct gpio_desc *trig_desc;
@@ -59,13 +59,13 @@ struct hc_sro4 {
 	struct list_head list;
 };
 
-static LIST_HEAD(hc_sro4_devices);
+static LIST_HEAD(hc_sr04_devices);
 static DEFINE_MUTEX(devices_mutex);
 
-static struct hc_sro4 *create_hc_sro4(int trig, int echo, unsigned long timeout)
+static struct hc_sr04 *create_hc_sr04(int trig, int echo, unsigned long timeout)
 		/* must be called with devices_mutex held */
 {
-	struct hc_sro4 *new;
+	struct hc_sr04 *new;
 	int err;
 
 	new = kmalloc(sizeof(*new), GFP_KERNEL);
@@ -101,14 +101,14 @@ static struct hc_sro4 *create_hc_sro4(int trig, int echo, unsigned long timeout)
 	init_waitqueue_head(&new->wait_for_echo);
 	new->timeout = timeout;
 
-	list_add_tail(&new->list, &hc_sro4_devices);
+	list_add_tail(&new->list, &hc_sr04_devices);
 
 	return new;
 }
 
 static irqreturn_t echo_received_irq(int irq, void *data)
 {
-	struct hc_sro4 *device = (struct hc_sro4 *) data;
+	struct hc_sr04 *device = (struct hc_sr04 *) data;
 	int val;
 	struct timeval irq_tv;
 
@@ -135,7 +135,7 @@ static irqreturn_t echo_received_irq(int irq, void *data)
  * before we lock it.
  */
 
-static int do_measurement(struct hc_sro4 *device,
+static int do_measurement(struct hc_sr04 *device,
 			  unsigned long long *usecs_elapsed)
 {
 	long timeout;
@@ -164,7 +164,7 @@ static int do_measurement(struct hc_sro4 *device,
 
 	ret = request_any_context_irq(irq, echo_received_irq,
 		IRQF_SHARED | IRQF_TRIGGER_FALLING | IRQF_TRIGGER_RISING,
-		"hc_sro4", device);
+		"hc_sr04", device);
 
 	if (ret < 0)
 		goto out_mutex;
@@ -205,7 +205,7 @@ static ssize_t sysfs_do_measurement(struct device *dev,
 				    struct device_attribute *attr,
 				    char *buf)
 {
-	struct hc_sro4 *sensor = dev_get_drvdata(dev);
+	struct hc_sr04 *sensor = dev_get_drvdata(dev);
 	unsigned long long usecs_elapsed;
 	int status;
 
@@ -239,23 +239,23 @@ static ssize_t sysfs_configure_store(struct class *class,
 				struct class_attribute *attr,
 				const char *buf, size_t len);
 
-static struct class_attribute hc_sro4_class_attrs[] = {
+static struct class_attribute hc_sr04_class_attrs[] = {
 	__ATTR(configure, 0200, NULL, sysfs_configure_store),
 	__ATTR_NULL,
 };
 
-static struct class hc_sro4_class = {
+static struct class hc_sr04_class = {
 	.name = "distance-sensor",
 	.owner = THIS_MODULE,
-	.class_attrs = hc_sro4_class_attrs
+	.class_attrs = hc_sr04_class_attrs
 };
 
 
-static struct hc_sro4 *find_sensor(int trig, int echo)
+static struct hc_sr04 *find_sensor(int trig, int echo)
 {
-	struct hc_sro4 *sensor;
+	struct hc_sr04 *sensor;
 
-	list_for_each_entry(sensor, &hc_sro4_devices, list) {
+	list_for_each_entry(sensor, &hc_sr04_devices, list) {
 		if (sensor->gpio_trig == trig &&
 		    sensor->gpio_echo == echo)
 			return sensor;
@@ -268,12 +268,12 @@ static int match_device(struct device *dev, const void *data)
 	return dev_get_drvdata(dev) == data;
 }
 
-static int remove_sensor(struct hc_sro4 *rip_sensor)
+static int remove_sensor(struct hc_sr04 *rip_sensor)
 	/* must be called with devices_mutex held. */
 {
 	struct device *dev;
 
-	dev = class_find_device(&hc_sro4_class, NULL, rip_sensor, match_device);
+	dev = class_find_device(&hc_sr04_class, NULL, rip_sensor, match_device);
 	if (dev == NULL)
 		return -ENODEV;
 
@@ -295,7 +295,7 @@ static ssize_t sysfs_configure_store(struct class *class,
 	int add = buf[0] != '-';
 	const char *s = buf;
 	int trig, echo, timeout;
-	struct hc_sro4 *new_sensor, *rip_sensor;
+	struct hc_sr04 *new_sensor, *rip_sensor;
 	int err;
 
 	if (buf[0] == '-' || buf[0] == '+')
@@ -311,7 +311,7 @@ static ssize_t sysfs_configure_store(struct class *class,
 			return -EEXIST;
 		}
 
-		new_sensor = create_hc_sro4(trig, echo, timeout);
+		new_sensor = create_hc_sr04(trig, echo, timeout);
 		mutex_unlock(&devices_mutex);
 		if (IS_ERR(new_sensor))
 			return PTR_ERR(new_sensor);
@@ -336,28 +336,28 @@ static ssize_t sysfs_configure_store(struct class *class,
 	return len;
 }
 
-static int __init init_hc_sro4(void)
+static int __init init_hc_sr04(void)
 {
-	return class_register(&hc_sro4_class);
+	return class_register(&hc_sr04_class);
 }
 
-static void exit_hc_sro4(void)
+static void exit_hc_sr04(void)
 {
-	struct hc_sro4 *rip_sensor, *tmp;
+	struct hc_sr04 *rip_sensor, *tmp;
 
 	mutex_lock(&devices_mutex);
-	list_for_each_entry_safe(rip_sensor, tmp, &hc_sro4_devices, list) {
+	list_for_each_entry_safe(rip_sensor, tmp, &hc_sr04_devices, list) {
 		remove_sensor(rip_sensor);   /* ignore errors */
 	}
 	mutex_unlock(&devices_mutex);
 
-	class_unregister(&hc_sro4_class);
+	class_unregister(&hc_sr04_class);
 }
 
-module_init(init_hc_sro4);
-module_exit(exit_hc_sro4);
+module_init(init_hc_sr04);
+module_exit(exit_hc_sr04);
 
 MODULE_AUTHOR("Johannes Thoma");
-MODULE_DESCRIPTION("Distance measurement for the HC-SRO4 ultrasonic distance sensor");
+MODULE_DESCRIPTION("Distance measurement for the HC-SR04 ultrasonic distance sensor");
 MODULE_LICENSE("GPL");
 
