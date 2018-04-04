@@ -40,15 +40,14 @@
 #include <linux/kdev_t.h>
 #include <linux/list.h>
 #include <linux/slab.h>
-#include <linux/gpio/driver.h>
+#include <linux/gpio.h>
 #include <linux/delay.h>
 #include <linux/sched.h>
 
 struct hc_sr04 {
 	int gpio_trig;
 	int gpio_echo;
-	struct gpio_desc *trig_desc;
-	struct gpio_desc *echo_desc;
+	int irq;
 	struct timeval time_triggered;
 	struct timeval time_echoed;
 	int echo_received;
@@ -62,6 +61,59 @@ struct hc_sr04 {
 static LIST_HEAD(hc_sr04_devices);
 static DEFINE_MUTEX(devices_mutex);
 
+static int setup_hc_sr04_gpio(int trig, int echo)
+{
+	int ret;
+
+	ret = 0;
+	if (!gpio_is_valid(trig) || !gpio_is_valid(echo)) {
+		pr_err("Failed validation of GPIOs %d, %d\n", trig, echo);
+		return -EINVAL;
+	}
+
+	ret = gpio_request(trig, "trig");
+	if (ret < 0) {
+		pr_err("GPIO %d request failed. Exiting.\n", trig);
+		return ret;
+	}
+
+	ret = gpio_request(echo, "echo");
+	if (ret < 0) {
+		pr_err("GPIO %d request failed. Exiting.\n", echo);
+		gpio_free(trig);
+		return ret;
+	}
+
+	gpio_direction_output(trig, 0);
+	gpio_direction_input(echo);
+
+	pr_info("hc-sr04: acquired gpio trig=%d, echo=%d\n", trig, echo);
+
+	return ret;
+}
+static irqreturn_t echo_received_irq(int irq, void *data);
+static int setup_hc_sr04_irq(struct hc_sr04 *device)
+{
+	int ret;
+
+	ret = 0;
+
+	device->irq = gpio_to_irq(device->gpio_echo);
+	if (device->irq < 0) {
+		pr_err("Failed to retrieve IRQ number for echo GPIO. Exiting.\n");
+		return device->irq;
+	}
+
+	pr_info("hc-sr04: assigned IRQ number %d\n", device->irq);
+	ret = request_any_context_irq(device->irq, echo_received_irq,
+		IRQF_SHARED | IRQF_TRIGGER_FALLING | IRQF_TRIGGER_RISING,
+		"hc_sr04", device);
+	if (ret < 0) {
+		pr_err("request_irq() failed. Exiting.\n");
+	}
+	return ret;
+}
+
 static struct hc_sr04 *create_hc_sr04(int trig, int echo, unsigned long timeout)
 		/* must be called with devices_mutex held */
 {
@@ -74,36 +126,37 @@ static struct hc_sr04 *create_hc_sr04(int trig, int echo, unsigned long timeout)
 
 	new->gpio_echo = echo;
 	new->gpio_trig = trig;
-	new->echo_desc = gpio_to_desc(echo);
-	if (new->echo_desc == NULL) {
-		kfree(new);
-		return ERR_PTR(-EINVAL);
-	}
-	new->trig_desc = gpio_to_desc(trig);
-	if (new->trig_desc == NULL) {
-		kfree(new);
-		return ERR_PTR(-EINVAL);
-	}
 
-	err = gpiod_direction_input(new->echo_desc);
-	if (err < 0) {
+	err = setup_hc_sr04_gpio(new->gpio_trig, new->gpio_echo);
+	if (err != 0) {
 		kfree(new);
 		return ERR_PTR(err);
 	}
-	err = gpiod_direction_output(new->trig_desc, 0);
-	if (err < 0) {
-		kfree(new);
-		return ERR_PTR(err);
-	}
-	gpiod_set_value(new->trig_desc, 0);
 
 	mutex_init(&new->measurement_mutex);
 	init_waitqueue_head(&new->wait_for_echo);
 	new->timeout = timeout;
 
+	err = setup_hc_sr04_irq(new);
+	if (err != 0) {
+		gpio_free(new->gpio_trig);
+		gpio_free(new->gpio_echo);
+		kfree(new);
+		return ERR_PTR(err);
+	}
+
 	list_add_tail(&new->list, &hc_sr04_devices);
 
 	return new;
+}
+
+static void destroy_hc_sr04(struct hc_sr04 *device)
+{
+	list_del(&device->list);
+	free_irq(device->irq, device);
+	gpio_free(device->gpio_echo);
+	gpio_free(device->gpio_trig);
+	kfree(device);
 }
 
 static irqreturn_t echo_received_irq(int irq, void *data)
@@ -119,7 +172,7 @@ static irqreturn_t echo_received_irq(int irq, void *data)
 	if (device->echo_received)
 		return IRQ_HANDLED;
 
-	val = gpiod_get_value(device->echo_desc);
+	val = __gpio_get_value(device->gpio_echo);
 	if (val == 1) {
 		device->time_triggered = irq_tv;
 	} else {
@@ -139,7 +192,6 @@ static int do_measurement(struct hc_sr04 *device,
 			  unsigned long long *usecs_elapsed)
 {
 	long timeout;
-	int irq;
 	int ret;
 
 	if (!mutex_trylock(&device->measurement_mutex)) {
@@ -153,31 +205,13 @@ static int do_measurement(struct hc_sr04 *device,
 		 * now, a while true ; do cat measure ; done should work
 		 */
 
-	irq = gpiod_to_irq(device->echo_desc);
-	if (irq < 0) {
-		ret = -EIO;
-		goto out_mutex;
-	}
-
 	device->echo_received = 0;
 	device->device_triggered = 0;
 
-	ret = request_any_context_irq(irq, echo_received_irq,
-		IRQF_SHARED | IRQF_TRIGGER_FALLING | IRQF_TRIGGER_RISING,
-		"hc_sr04", device);
-
-	if (ret < 0)
-		goto out_mutex;
-
-	gpiod_set_value(device->trig_desc, 1);
+	gpio_set_value(device->gpio_trig, 1);
 	udelay(10);
 	device->device_triggered = 1;
-	gpiod_set_value(device->trig_desc, 0);
-
-	ret = gpiochip_lock_as_irq(gpiod_to_chip(device->echo_desc),
-				   device->gpio_echo);
-	if (ret < 0)
-		goto out_irq;
+	gpio_set_value(device->gpio_trig, 0);
 
 	timeout = wait_event_interruptible_timeout(device->wait_for_echo,
 				device->echo_received, device->timeout);
@@ -192,10 +226,7 @@ static int do_measurement(struct hc_sr04 *device,
 	(device->time_echoed.tv_usec - device->time_triggered.tv_usec);
 		ret = 0;
 	}
-/* TODO: unlock_as_irq */
-out_irq:
-	free_irq(irq, device);
-out_mutex:
+
 	mutex_unlock(&device->measurement_mutex);
 
 	return ret;
@@ -235,12 +266,12 @@ static const struct attribute_group *sensor_groups[] = {
 	NULL
 };
 
-static ssize_t sysfs_configure_store(struct class *class,
+static ssize_t configure_store(struct class *class,
 				struct class_attribute *attr,
 				const char *buf, size_t len);
 
 static struct class_attribute hc_sr04_class_attrs[] = {
-	__ATTR(configure, 0200, NULL, sysfs_configure_store),
+	__ATTR(configure, 0200, NULL, configure_store),
 	__ATTR_NULL,
 };
 
@@ -268,6 +299,20 @@ static int match_device(struct device *dev, const void *data)
 	return dev_get_drvdata(dev) == data;
 }
 
+static int add_sensor(int trig, int echo, unsigned long timeout)
+{
+	struct hc_sr04 *new_sensor;
+
+	new_sensor = create_hc_sr04(trig, echo, timeout);
+	if (IS_ERR(new_sensor)) {
+		return PTR_ERR(new_sensor);
+	}
+
+	device_create_with_groups(&hc_sr04_class, NULL, MKDEV(0, 0), new_sensor,
+			sensor_groups, "distance_%d_%d", trig, echo);
+	return 0;
+}
+
 static int remove_sensor(struct hc_sr04 *rip_sensor)
 	/* must be called with devices_mutex held. */
 {
@@ -279,23 +324,23 @@ static int remove_sensor(struct hc_sr04 *rip_sensor)
 
 	mutex_lock(&rip_sensor->measurement_mutex);
 			/* wait until measurement has finished */
-	list_del(&rip_sensor->list);
-	kfree(rip_sensor);   /* TODO: ?? double free ?? */
 
 	device_unregister(dev);
 	put_device(dev);
+	mutex_unlock(&rip_sensor->measurement_mutex);
 
+	destroy_hc_sr04(rip_sensor);
 	return 0;
 }
 
-static ssize_t sysfs_configure_store(struct class *class,
+static ssize_t configure_store(struct class *class,
 				struct class_attribute *attr,
 				const char *buf, size_t len)
 {
 	int add = buf[0] != '-';
 	const char *s = buf;
 	int trig, echo, timeout;
-	struct hc_sr04 *new_sensor, *rip_sensor;
+	struct hc_sr04 *rip_sensor;
 	int err;
 
 	if (buf[0] == '-' || buf[0] == '+')
@@ -311,13 +356,11 @@ static ssize_t sysfs_configure_store(struct class *class,
 			return -EEXIST;
 		}
 
-		new_sensor = create_hc_sr04(trig, echo, timeout);
+		err = add_sensor(trig, echo, timeout);
 		mutex_unlock(&devices_mutex);
-		if (IS_ERR(new_sensor))
-			return PTR_ERR(new_sensor);
-
-		device_create_with_groups(class, NULL, MKDEV(0, 0), new_sensor,
-				sensor_groups, "distance_%d_%d", trig, echo);
+		if (err < 0)
+			return err;
+		pr_info("hc-sr04: added device trig=%d echo=%d\n", trig, echo);
 	} else {
 		if (sscanf(s, "%d %d", &trig, &echo) != 2)
 			return -EINVAL;
@@ -328,10 +371,12 @@ static ssize_t sysfs_configure_store(struct class *class,
 			mutex_unlock(&devices_mutex);
 			return -ENODEV;
 		}
+
 		err = remove_sensor(rip_sensor);
 		mutex_unlock(&devices_mutex);
 		if (err < 0)
 			return err;
+		pr_info("hc-sr04: removed device trig=%d echo=%d\n", trig, echo);
 	}
 	return len;
 }
