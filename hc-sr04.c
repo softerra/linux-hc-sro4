@@ -270,15 +270,19 @@ static ssize_t configure_store(struct class *class,
 				struct class_attribute *attr,
 				const char *buf, size_t len);
 
-static struct class_attribute hc_sr04_class_attrs[] = {
-	__ATTR(configure, 0200, NULL, configure_store),
-	__ATTR_NULL,
+static CLASS_ATTR_WO(configure);
+
+static struct attribute *hc_sr04_class_attrs[] = {
+	&class_attr_configure.attr,
+	NULL,
 };
+
+ATTRIBUTE_GROUPS(hc_sr04_class);
 
 static struct class hc_sr04_class = {
 	.name = "distance-sensor",
 	.owner = THIS_MODULE,
-	.class_attrs = hc_sr04_class_attrs
+	.class_groups   = hc_sr04_class_groups,
 };
 
 
