@@ -164,8 +164,12 @@ static irqreturn_t echo_received_irq(int irq, void *data)
 	struct hc_sr04 *device = (struct hc_sr04 *) data;
 	int val;
 	struct timeval irq_tv;
+	struct timespec64 ts;
 
-	do_gettimeofday(&irq_tv);
+	//do_gettimeofday(&irq_tv);
+	ktime_get_real_ts64(&ts);
+	irq_tv.tv_sec = ts.tv_sec;
+	irq_tv.tv_usec = ts.tv_nsec;
 
 	if (!device->device_triggered)
 		return IRQ_HANDLED;
