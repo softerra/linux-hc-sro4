@@ -48,8 +48,8 @@ struct hc_sr04 {
 	int gpio_trig;
 	int gpio_echo;
 	int irq;
-	struct timeval time_triggered;
-	struct timeval time_echoed;
+	struct timespec64 time_triggered;
+	struct timespec64 time_echoed;
 	int echo_received;
 	int device_triggered;
 	struct mutex measurement_mutex;
@@ -163,13 +163,9 @@ static irqreturn_t echo_received_irq(int irq, void *data)
 {
 	struct hc_sr04 *device = (struct hc_sr04 *) data;
 	int val;
-	struct timeval irq_tv;
-	struct timespec64 ts;
+	struct timespec64 irq_ts;
 
-	//do_gettimeofday(&irq_tv);
-	ktime_get_real_ts64(&ts);
-	irq_tv.tv_sec = ts.tv_sec;
-	irq_tv.tv_usec = ts.tv_nsec;
+	ktime_get_real_ts64(&irq_ts);
 
 	if (!device->device_triggered)
 		return IRQ_HANDLED;
@@ -178,9 +174,9 @@ static irqreturn_t echo_received_irq(int irq, void *data)
 
 	val = __gpio_get_value(device->gpio_echo);
 	if (val == 1) {
-		device->time_triggered = irq_tv;
+		device->time_triggered = irq_ts;
 	} else {
-		device->time_echoed = irq_tv;
+		device->time_echoed = irq_ts;
 		device->echo_received = 1;
 		wake_up_interruptible(&device->wait_for_echo);
 	}
@@ -227,7 +223,7 @@ static int do_measurement(struct hc_sr04 *device,
 	else {
 		*usecs_elapsed =
 	(device->time_echoed.tv_sec - device->time_triggered.tv_sec) * 1000000 +
-	(device->time_echoed.tv_usec - device->time_triggered.tv_usec);
+	(device->time_echoed.tv_nsec - device->time_triggered.tv_nsec) / 1000;
 		ret = 0;
 	}
 
